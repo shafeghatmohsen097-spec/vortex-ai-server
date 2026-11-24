@@ -127,6 +127,87 @@ app.post("/api/image", async (req, res) => {
   }
 });
 
+// Persian text-to-speech through Cloudflare's unified AI catalog.
+// Uses the existing server-side Cloudflare token; audio generation is metered.
+app.post("/api/speech", async (req, res) => {
+  try {
+    const text = req.body?.text;
+    if (typeof text !== "string" || !text.trim() || text.length > 3500) {
+      return res.status(400).json({ success: false, error: "Text must contain 1 to 3500 characters." });
+    }
+    const credentials = cloudflareCredentials();
+    if (!credentials) {
+      return res.status(500).json({ success: false, error: "Cloudflare credentials are missing on the server." });
+    }
+
+    const endpoint = `https://api.cloudflare.com/client/v4/accounts/${credentials.accountId}/ai/run`;
+    const upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${credentials.apiToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "openai/tts-1",
+        input: {
+          text: text.trim(),
+          voice: "nova",
+          response_format: "mp3",
+          speed: 1
+        }
+      }),
+      signal: AbortSignal.timeout(120000)
+    });
+
+    const data = await upstream.json().catch(() => null);
+    if (!upstream.ok || !data?.success) {
+      console.error("Cloudflare speech request failed:", upstream.status, data?.errors || "");
+      return res.status(upstream.status || 502).json({
+        success: false,
+        error: "Cloudflare speech generation failed.",
+        details: data?.errors || undefined
+      });
+    }
+
+    const audioRef = data.result?.audio;
+    if (typeof audioRef !== "string" || !audioRef) {
+      return res.status(502).json({ success: false, error: "Speech model returned no audio file." });
+    }
+
+    let audioBuffer;
+    if (audioRef.startsWith("data:")) {
+      const encoded = audioRef.split(",")[1] || "";
+      audioBuffer = Buffer.from(encoded, "base64");
+    } else if (/^https:\/\//i.test(audioRef)) {
+      const audioResponse = await fetch(audioRef, { signal: AbortSignal.timeout(60000) });
+      if (!audioResponse.ok) {
+        return res.status(502).json({ success: false, error: "Could not download the generated audio." });
+      }
+      audioBuffer = Buffer.from(await audioResponse.arrayBuffer());
+    } else {
+      audioBuffer = Buffer.from(audioRef, "base64");
+    }
+
+    if (!audioBuffer.length) {
+      return res.status(502).json({ success: false, error: "Generated audio file was empty." });
+    }
+
+    return res.json({
+      success: true,
+      audio: audioBuffer.toString("base64"),
+      mimeType: "audio/mpeg",
+      model: "openai/tts-1 via Cloudflare AI"
+    });
+  } catch (error) {
+    console.error("VORTEX speech error:", error.message);
+    const timeout = error.name === "TimeoutError" || error.name === "AbortError";
+    return res.status(timeout ? 504 : 502).json({
+      success: false,
+      error: timeout ? "Speech generation timed out. Please try again." : "Could not reach the speech generation service."
+    });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`VORTEX server running on port ${PORT}`);
