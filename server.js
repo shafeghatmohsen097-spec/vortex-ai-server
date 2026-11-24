@@ -155,21 +155,21 @@ const MOTION_HELPER_SOURCE = String.raw`
 
 int main(int argc, char **argv) {
     if (argc != 4) {
-        fprintf(stderr, "usage: sprongmotion-generate model.gguf prompt seconds\\n");
+        fprintf(stderr, "usage: sprongmotion-generate model.gguf prompt seconds\n");
         return 2;
     }
 
     char *end = NULL;
     float seconds = strtof(argv[3], &end);
-    if (end == argv[3] || *end != '\\0' || seconds < 0.5f || seconds > 3.0f) {
-        fprintf(stderr, "seconds must be between 0.5 and 3.0\\n");
+    if (end == argv[3] || *end != '\0' || seconds < 0.5f || seconds > 3.0f) {
+        fprintf(stderr, "seconds must be between 0.5 and 3.0\n");
         return 2;
     }
 
     sm_set_thread_count(1);
     sm_model model = sm_load_model(argv[1]);
     if (!sm_is_model_valid(model)) {
-        fprintf(stderr, "%s\\n", sm_get_error());
+        fprintf(stderr, "%s\n", sm_get_error());
         return 1;
     }
 
@@ -181,14 +181,14 @@ int main(int argc, char **argv) {
 
     sm_motion motion = sm_generate_motion_ex(model, argv[2], options);
     if (!sm_is_motion_valid(motion)) {
-        fprintf(stderr, "%s\\n", sm_get_error());
+        fprintf(stderr, "%s\n", sm_get_error());
         sm_unload_model(model);
         return 1;
     }
 
     char *bvh = sm_export_motion_bvh_text(motion, 100.0f);
     if (!bvh) {
-        fprintf(stderr, "%s\\n", sm_get_error());
+        fprintf(stderr, "%s\n", sm_get_error());
         sm_unload_motion(motion);
         sm_unload_model(model);
         return 1;
