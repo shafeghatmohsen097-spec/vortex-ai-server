@@ -7,81 +7,103 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
+// Server status
 app.get("/", (req, res) => {
   res.json({
     name: "VORTEX AI Server",
     status: "online",
-    ai: "Cloudflare Workers AI"
+    ai: "Cloudflare Workers AI",
+    model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
   });
 });
 
+// Health check
 app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+  res.json({
+    status: "ok",
+    server: "VORTEX"
+  });
 });
 
+// AI Chat API
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message } = req.body || {};
 
-    if (!message || typeof message !== "string") {
+    if (!message || typeof message !== "string" || !message.trim()) {
       return res.status(400).json({
-        error: "Message is required"
+        success: false,
+        error: "A valid message is required"
       });
     }
 
-    if (!process.env.CLOUDFLARE_ACCOUNT_ID ||
-        !process.env.CLOUDFLARE_API_TOKEN) {
+    if (
+      !process.env.CLOUDFLARE_ACCOUNT_ID ||
+      !process.env.CLOUDFLARE_API_TOKEN
+    ) {
       return res.status(500).json({
+        success: false,
         error: "Cloudflare credentials are missing"
       });
     }
 
-    const response = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          messages: [
-            {
-              role: "system",
-              content: "You are VORTEX AI, a helpful assistant."
-            },
-            {
-              role: "user",
-              content: message
-            }
-          ],
-          max_tokens: 512
-        })
-      }
-    );
+    const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+    const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+
+    const apiUrl =
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/meta/llama-3.3-70b-instruct-fp8-fast`;
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: "system",
+            content: "You are VORTEX AI, a helpful and intelligent assistant. Respond clearly in the user's language."
+          },
+          {
+            role: "user",
+            content: message.trim()
+          }
+        ],
+        max_tokens: 512
+      })
+    });
 
     const data = await response.json();
 
     if (!response.ok || !data.success) {
-      return res.status(response.status || 500).json({
+      console.error("Cloudflare API error:", data.errors || data);
+
+      return res.status(response.status || 502).json({
+        success: false,
         error: "Cloudflare AI request failed",
         details: data.errors || data
       });
     }
 
-    res.json({
+    return res.json({
       success: true,
-      response: data.result?.response || data.result
+      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      response: data.result?.response || ""
     });
 
   } catch (error) {
-    res.status(500).json({
-      error: "Server error",
+    console.error("VORTEX server error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error",
       details: error.message
     });
   }
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
