@@ -96,7 +96,7 @@ app.post("/api/image", async (req, res) => {
         Authorization: `Bearer ${credentials.apiToken}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ prompt: prompt.trim(), steps: 4 }),
+      body: JSON.stringify({ prompt: prompt.trim(), steps: 1 }),
       signal: AbortSignal.timeout(120000)
     });
     const data = await upstream.json().catch(() => null);
@@ -403,6 +403,85 @@ app.post("/api/motion/video",async(req,res)=>{
     res.setHeader("Content-Type","video/mp4");res.setHeader("Content-Disposition",'attachment; filename="vortex-motion.mp4"');res.setHeader("X-Vortex-Render",JSON.stringify(meta));return res.send(video);
   }catch(error){console.error("VORTEX BVH-to-MP4 error:",error.message);return res.status(503).json({success:false,error:"Local MP4 rendering failed.",details:error.message});}
   finally{await fsp.rm(output,{force:true}).catch(()=>{});motionBusy=false;}
+});
+
+
+// Still-image to smooth MP4: PixFlow-inspired camera motion + Cinemagraph-style
+// procedural overlays. No video model, shared GPU, or external video inference.
+app.post("/api/image-to-video", async (req, res) => {
+  const input = req.body?.image;
+  const seconds = Math.min(8, Math.max(3, Number(req.body?.seconds ?? 5)));
+  const ratio = req.body?.ratio === "16:9" ? "16:9" : "9:16";
+  const effect = ["cinematic", "rain", "snow", "dust", "wind"].includes(req.body?.effect)
+    ? req.body.effect : "cinematic";
+  if (typeof input !== "string" || !/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(input)) {
+    return res.status(400).json({ success: false, error: "A base64 JPEG, PNG, or WebP image is required." });
+  }
+  const encoded = input.slice(input.indexOf(",") + 1);
+  if (encoded.length > 8 * 1024 * 1024) {
+    return res.status(413).json({ success: false, error: "Image is too large. Maximum is 6 MB." });
+  }
+  const ext = input.slice(0, input.indexOf(";")).includes("png") ? ".png" :
+    input.slice(0, input.indexOf(";")).includes("webp") ? ".webp" : ".jpg";
+  const id = crypto.randomUUID();
+  const source = path.join(os.tmpdir(), "vortex-still-" + id + ext);
+  const output = path.join(os.tmpdir(), "vortex-film-" + id + ".mp4");
+  try {
+    await fsp.writeFile(source, Buffer.from(encoded, "base64"));
+    const width = ratio === "16:9" ? 854 : 480;
+    const height = ratio === "16:9" ? 480 : 854;
+    const frames = Math.round(seconds * 24);
+    const filters = [
+      "scale=" + width + ":" + height + ":force_original_aspect_ratio=increase",
+      "crop=" + width + ":" + height,
+      "zoompan=z='min(zoom+0.00065,1.075)':x='iw/2-(iw/zoom/2)+sin(on/34)*4':y='ih/2-(ih/zoom/2)+cos(on/43)*4':d=1:s=" + width + "x" + height + ":fps=24",
+      "eq=contrast=1.045:saturation=1.06",
+      "vignette=PI/5",
+      "noise=alls=2:allf=t"
+    ];
+    if (effect === "rain") {
+      for (let i = 0; i < 14; i++) filters.push(
+        "drawbox=x='mod(t*210+" + (i*71) + ",iw)':y='mod(t*430+" + (i*113) + ",ih)':w=2:h=25:color=white@0.28:t=fill"
+      );
+      filters.push("eq=brightness=-0.025");
+    } else if (effect === "snow") {
+      for (let i = 0; i < 22; i++) filters.push(
+        "drawbox=x='mod(" + (i*47) + "+t*13,iw)':y='mod(" + (i*89) + "+t*38,ih)':w=3:h=3:color=white@0.55:t=fill"
+      );
+    } else if (effect === "dust") {
+      for (let i = 0; i < 16; i++) filters.push(
+        "drawbox=x='mod(" + (i*83) + "+t*7,iw)':y='mod(" + (i*59) + "+t*19,ih)':w=2:h=2:color=0xffdca0@0.48:t=fill"
+      );
+    } else if (effect === "wind") {
+      filters[2] = "zoompan=z='min(zoom+0.00055,1.065)':x='iw/2-(iw/zoom/2)+sin(on/19)*7':y='ih/2-(ih/zoom/2)+cos(on/27)*5':d=1:s=" + width + "x" + height + ":fps=24";
+    }
+    filters.push("format=yuv420p");
+    await execFileAsync("ffmpeg", [
+      "-y", "-hide_banner", "-loglevel", "error",
+      "-loop", "1", "-i", source,
+      "-vf", filters.join(","),
+      "-frames:v", String(frames), "-r", "24", "-an",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart", output
+    ], { timeout: 120000, maxBuffer: 2 * 1024 * 1024 });
+    const video = await fsp.readFile(output);
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Disposition", 'attachment; filename="vortex-cinematic.mp4"');
+    res.setHeader("X-Vortex-Engine", "PixFlow-inspired + Cinemagraph-procedural");
+    return res.send(video);
+  } catch (error) {
+    console.error("VORTEX image-to-video error:", error.message);
+    return res.status(503).json({
+      success: false,
+      error: "Image-to-video rendering failed on this server.",
+      details: error.message
+    });
+  } finally {
+    await Promise.all([
+      fsp.rm(source, { force: true }).catch(() => {}),
+      fsp.rm(output, { force: true }).catch(() => {})
+    ]);
+  }
 });
 
 const PORT = process.env.PORT || 3000;
