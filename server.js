@@ -54,7 +54,7 @@ app.post("/api/chat", async (req, res) => {
           { role: "system", content: "You are VORTEX AI, a helpful and intelligent assistant. Respond clearly in the user's language." },
           { role: "user", content: message.trim() }
         ],
-        max_tokens: 512
+        max_tokens: 2048
       }),
       signal: AbortSignal.timeout(90000)
     });
