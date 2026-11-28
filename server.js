@@ -4,7 +4,7 @@ const cors = require("cors");
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 const IMAGE_MODEL = "@cf/black-forest-labs/flux-1-schnell";
 
@@ -481,6 +481,111 @@ app.post("/api/image-to-video", async (req, res) => {
       fsp.rm(source, { force: true }).catch(() => {}),
       fsp.rm(output, { force: true }).catch(() => {})
     ]);
+  }
+});
+
+
+let videoBusy = false;
+
+app.get("/api/video/status", (req, res) => {
+  res.json({
+    success: true,
+    engine: cloudflareCredentials() ? "connected" : "missing_credentials",
+    model: "pruna/p-video",
+    maxSeconds: 20,
+    resolution: "720p",
+    draftPricePerSecondUsd: 0.005
+  });
+});
+
+app.post("/api/video", async (req, res) => {
+  const prompt = typeof req.body?.prompt === "string" ? req.body.prompt.trim() : "";
+  const duration = Number(req.body?.duration ?? 5);
+  const aspectRatio = req.body?.aspect_ratio;
+  const image = req.body?.image;
+
+  if (!prompt || prompt.length > 3000) {
+    return res.status(400).json({ success: false, error: "Prompt must contain 1 to 3000 characters." });
+  }
+  if (!Number.isInteger(duration) || duration < 1 || duration > 20) {
+    return res.status(400).json({ success: false, error: "Video duration must be between 1 and 20 seconds." });
+  }
+  if (!["9:16", "16:9", "1:1", "4:3", "3:4", "3:2", "2:3"].includes(aspectRatio)) {
+    return res.status(400).json({ success: false, error: "Unsupported aspect ratio." });
+  }
+  if (image !== undefined && image !== null) {
+    const validDataImage = typeof image === "string" && /^data:image\/(jpeg|jpg|png|webp);base64,/i.test(image);
+    const validHttpsUrl = typeof image === "string" && /^https:\/\/[^\s]+$/i.test(image);
+    if (!validDataImage && !validHttpsUrl) {
+      return res.status(400).json({ success: false, error: "Image must be a JPEG, PNG, or WebP data URI or HTTPS URL." });
+    }
+    if (validDataImage && image.length > 8 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: "Reference image is too large. Maximum file size is 6 MB." });
+    }
+  }
+  if (videoBusy) {
+    return res.status(429).json({ success: false, error: "The video engine is busy. Please try again shortly." });
+  }
+
+  const credentials = cloudflareCredentials();
+  if (!credentials) {
+    return res.status(500).json({ success: false, error: "Cloudflare credentials are missing on the server." });
+  }
+
+  videoBusy = true;
+  try {
+    const input = {
+      prompt,
+      duration,
+      resolution: "720p",
+      fps: 24,
+      aspect_ratio: aspectRatio,
+      draft: true,
+      save_audio: false,
+      prompt_upsampling: true,
+      disable_safety_filter: false
+    };
+    if (image) input.image = image;
+
+    const endpoint = "https://api.cloudflare.com/client/v4/accounts/" + credentials.accountId + "/ai/run";
+    const upstream = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + credentials.apiToken,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ model: "pruna/p-video", input }),
+      signal: AbortSignal.timeout(240000)
+    });
+    const data = await upstream.json().catch(() => null);
+    const videoUrl = data?.result?.video || data?.result?.videos?.[0]?.url || data?.video;
+    if (!upstream.ok || !videoUrl || typeof videoUrl !== "string" || !videoUrl.startsWith("https://")) {
+      console.error("Cloudflare video generation failed:", upstream.status, data?.errors || data?.message || "No video URL returned");
+      return res.status(upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502).json({
+        success: false,
+        error: "Cloud video generation failed.",
+        details: data?.errors || data?.message || undefined
+      });
+    }
+
+    return res.json({
+      success: true,
+      model: "pruna/p-video",
+      video: videoUrl,
+      duration,
+      resolution: "720p",
+      quality: "draft",
+      estimatedCostUsd: Number((duration * 0.005).toFixed(3))
+    });
+  } catch (error) {
+    console.error("VORTEX video error:", error.message);
+    const timeout = error.name === "TimeoutError" || error.name === "AbortError";
+    return res.status(timeout ? 504 : 502).json({
+      success: false,
+      error: timeout ? "Video generation timed out. Please try a shorter clip." : "Could not reach the cloud video model."
+    });
+  } finally {
+    videoBusy = false;
   }
 });
 
