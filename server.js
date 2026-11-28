@@ -380,7 +380,7 @@ function motionRaster(points,bounds,w,h) {
 }
 async function renderMotionMp4(bvhText,destination) {
   const parsed=parseMotionBvh(bvhText),w=320,h=320,fps=20,frames=[],bounds={minX:Infinity,maxX:-Infinity,minY:Infinity,maxY:-Infinity};
-  const total=Math.min(parsed.frameCount,60);
+  const total=parsed.frameCount;
   for(let f=0;f<total;f++){const vals=parsed.flat.slice(f*parsed.channelCount,(f+1)*parsed.channelCount),pts=motionFramePoints(parsed.root,vals);for(const p of pts){bounds.minX=Math.min(bounds.minX,p.p[0]);bounds.maxX=Math.max(bounds.maxX,p.p[0]);bounds.minY=Math.min(bounds.minY,p.p[1]);bounds.maxY=Math.max(bounds.maxY,p.p[1]);}frames.push(pts);}
   const {spawn}=require("node:child_process");
   const ff=spawn("ffmpeg",["-y","-loglevel","error","-f","rawvideo","-pix_fmt","rgb24","-s",w+"x"+h,"-r",String(fps),"-i","pipe:0","-an","-c:v","libx264","-preset","ultrafast","-crf","30","-pix_fmt","yuv420p","-movflags","+faststart",destination],{stdio:["pipe","ignore","pipe"]});
@@ -390,19 +390,45 @@ async function renderMotionMp4(bvhText,destination) {
   ff.stdin.end();await done;return {frames:total,duration:total/fps,width:w,height:h};
 }
 app.post("/api/motion/video",async(req,res)=>{
-  const prompt=req.body?.prompt,seconds=Number(req.body?.seconds??1.5);
+  const prompt=req.body?.prompt;
+  const seconds=Number(req.body?.seconds??3);
   if(typeof prompt!=="string"||!prompt.trim()||prompt.length>240)return res.status(400).json({success:false,error:"Prompt must contain 1 to 240 characters."});
-  if(!Number.isFinite(seconds)||seconds<0.5||seconds>3)return res.status(400).json({success:false,error:"Duration must be between 0.5 and 3 seconds."});
+  if(!Number.isFinite(seconds)||seconds<3||seconds>60)return res.status(400).json({success:false,error:"Duration must be between 3 and 60 seconds."});
   if(motionBusy)return res.status(429).json({success:false,error:"The local motion engine is busy. Try again shortly."});
-  motionBusy=true;const output=path.join(MOTION_ROOT,"motion-"+crypto.randomUUID()+".mp4");
+  motionBusy=true;
+  const output=path.join(MOTION_ROOT,"motion-"+crypto.randomUUID()+".mp4");
   try{
     await ensureMotionRuntime();
-    const {stdout}=await execFileAsync(MOTION_BIN,[MOTION_MODEL,prompt.trim(),String(seconds)],{timeout:120000,maxBuffer:12*1024*1024});
-    if(!stdout||!stdout.startsWith("HIERARCHY"))throw new Error("Motion model returned invalid BVH.");
-    const meta=await renderMotionMp4(stdout,output),video=await fsp.readFile(output);
-    res.setHeader("Content-Type","video/mp4");res.setHeader("Content-Disposition",'attachment; filename="vortex-motion.mp4"');res.setHeader("X-Vortex-Render",JSON.stringify(meta));return res.send(video);
-  }catch(error){console.error("VORTEX BVH-to-MP4 error:",error.message);return res.status(503).json({success:false,error:"Local MP4 rendering failed.",details:error.message});}
-  finally{await fsp.rm(output,{force:true}).catch(()=>{});motionBusy=false;}
+    const actions=prompt.split(/(?:,|;|\n|،|؛|سپس|بعدش|و بعد|\bthen\b|\band then\b|\bafter that\b)/i).map(x=>x.trim()).filter(Boolean);
+    const segmentCount=Math.ceil(seconds/3);
+    const bvhParts=[];
+    let baseHeader=null,baseFrameTime=null,totalBvhFrames=0;
+    for(let index=0;index<segmentCount;index++){
+      const actionIndex=Math.min(actions.length-1,Math.floor(index*actions.length/segmentCount));
+      const action=actions[actionIndex]||prompt.trim();
+      const chunkSeconds=Math.min(3,seconds-index*3);
+      const {stdout}=await execFileAsync(MOTION_BIN,[MOTION_MODEL,action.slice(0,240),String(chunkSeconds)],{timeout:120000,maxBuffer:12*1024*1024});
+      if(!stdout||!stdout.startsWith("HIERARCHY"))throw new Error("Motion model returned invalid BVH for segment "+(index+1)+".");
+      const motion=parseMotionBvh(stdout);
+      const motionIndex=stdout.indexOf("MOTION");
+      const header=stdout.slice(0,motionIndex).trim();
+      if(baseHeader===null){baseHeader=header;baseFrameTime=motion.frameTime;}
+      else if(header!==baseHeader||Math.abs(motion.frameTime-baseFrameTime)>0.000001)throw new Error("Skeleton or frame rate changed between segments; MP4 assembly stopped.");
+      const motionBody=stdout.slice(stdout.indexOf("Frame Time:",motionIndex)+("Frame Time:"+String(motion.frameTime)).length).trim();
+      bvhParts.push(motionBody);
+      totalBvhFrames+=motion.frameCount;
+    }
+    const mergedBvh=baseHeader+"\nMOTION\nFrames: "+totalBvhFrames+"\nFrame Time: "+baseFrameTime+"\n"+bvhParts.join("\n");
+    const meta=await renderMotionMp4(mergedBvh,output);
+    const video=await fsp.readFile(output);
+    res.setHeader("Content-Type","video/mp4");
+    res.setHeader("Content-Disposition",'attachment; filename="vortex-motion-'+seconds+'s.mp4"');
+    res.setHeader("X-Vortex-Render",JSON.stringify({...meta,segments:segmentCount,requestedDuration:seconds,format:"mp4"}));
+    return res.send(video);
+  }catch(error){
+    console.error("VORTEX BVH-to-MP4 error:",error.message);
+    return res.status(503).json({success:false,error:"Local MP4 rendering failed.",details:error.message});
+  }finally{await fsp.rm(output,{force:true}).catch(()=>{});motionBusy=false;}
 });
 
 
