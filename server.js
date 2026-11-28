@@ -414,7 +414,7 @@ app.post("/api/motion/video",async(req,res)=>{
       const header=stdout.slice(0,motionIndex).trim();
       if(baseHeader===null){baseHeader=header;baseFrameTime=motion.frameTime;}
       else if(header!==baseHeader||Math.abs(motion.frameTime-baseFrameTime)>0.000001)throw new Error("Skeleton or frame rate changed between segments; MP4 assembly stopped.");
-      const motionBody=stdout.slice(stdout.indexOf("Frame Time:",motionIndex)+("Frame Time:"+String(motion.frameTime)).length).trim();
+      const motionHeader=stdout.match(/MOTION\\s+Frames:\\s*\\d+\\s+Frame\\s+Time:\\s*[^\\r\\n]*\\r?\\n/);\n      if(!motionHeader)throw new Error("BVH motion header could not be parsed for segment "+(index+1)+".");\n      const motionBody=stdout.slice(motionIndex+motionHeader[0].length).trim();
       bvhParts.push(motionBody);
       totalBvhFrames+=motion.frameCount;
     }
