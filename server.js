@@ -490,8 +490,8 @@ let videoBusy = false;
 app.get("/api/video/status", (req, res) => {
   res.json({
     success: true,
-    engine: cloudflareCredentials() ? "connected" : "missing_credentials",
-    model: "pruna/p-video",
+    engine: "free_provider_setup_required",
+    model: "agnes-video-2.5-flash",
     maxSeconds: 20,
     resolution: "720p",
     draftPricePerSecondUsd: 0.005
@@ -526,6 +526,8 @@ app.post("/api/video", async (req, res) => {
   if (videoBusy) {
     return res.status(429).json({ success: false, error: "The video engine is busy. Please try again shortly." });
   }
+
+  return res.status(503).json({ success: false, error: "موتور رایگان هنوز راه‌اندازی نشده است؛ هیچ درخواست پولی ارسال نمی‌شود." });
 
   const credentials = cloudflareCredentials();
   if (!credentials) {
